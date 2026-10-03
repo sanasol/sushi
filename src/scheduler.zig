@@ -1787,7 +1787,7 @@ pub const Scheduler = struct {
             if (self.expert_cache_bytes == 0 and settings_budget == 0) return error.ExpertStreamingRequired;
             const geometry = streamingGeometryOf(owned.config);
             const layout = try expert_stream_mod.quant.streamingLayoutOfDir(self.allocator, self.io, owned.config.model_type, entry.path, geometry.layers, geometry.first_moe_layer);
-            var split = try model_mod.streamingResidentSplit(self.io, self.allocator, entry.path, layout);
+            var split = try model_mod.streamingResidentSplitWithVision(self.io, self.allocator, entry.path, layout, coldLoadVision(owned.config.has_vision) and owned.config.isQwen4());
             var layout_config = owned.config.*;
             layout_config.expert_layout = layout;
             split.trunk +|= mimoCoarseHeadBytes(&layout_config);
@@ -3555,7 +3555,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
         const geometry = streamingGeometryOf(params.config);
         const layout = try expert_stream_mod.quant.streamingLayoutOfDir(sch.allocator, sch.io, params.config.model_type, params.model_dir, geometry.layers, geometry.first_moe_layer);
         params.config.expert_layout = layout;
-        var split = try model_mod.streamingResidentSplit(sch.io, sch.allocator, params.model_dir, layout);
+        var split = try model_mod.streamingResidentSplitWithVision(sch.io, sch.allocator, params.model_dir, layout, params.load_vision and params.config.isQwen4());
         split.trunk +|= mimoCoarseHeadBytes(params.config);
         const mtp = mtpChoiceFor(params.mtp_enabled, params.mtp_explicit, params.config);
         if (mtp.source == .fast) log.info("[mtp] off: unsupported under streaming (--fast)\n", .{});
@@ -3974,7 +3974,7 @@ fn doLoadOnInferenceThread(sch: *Scheduler, params: anytype) !void {
     // (model declares vision in config but the safetensors didn't ship the
     // tower); other errors fail the whole load.
     var vision_ptr: ?*VisionEncoder = null;
-    if (params.load_vision and !params.config.expert_streaming) {
+    if (params.load_vision and (!params.config.expert_streaming or params.config.isQwen4())) {
         const v = try sch.allocator.create(VisionEncoder);
         if (VisionEncoder.init(sch.allocator, params.config.*, weights_ptr)) |encoder| {
             v.* = encoder;

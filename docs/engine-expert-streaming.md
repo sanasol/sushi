@@ -36,6 +36,9 @@ the lazy trunk must fit before tensor evaluation. One admitted request owns the 
 CPU GatherMM, DFlash verification and streamed quantized GLM experts are refused. This diagnostic path does
 not enable public serving ([GLM foundation](arch-glm5-next.md)).
 
+Qwen streaming keeps its vision tower resident unless `--no-vision` is set; its weights count against the SSD
+budget, while image scratch and live KV need additional memory. MTP remains unsupported under streaming.
+
 ## Budget
 
 - `expert_stream.budgetLedger`, one `[expert-stream] ssd budget` boot line. `--ssd-budget-gb N` is a TOTAL resident

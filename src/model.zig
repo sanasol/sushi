@@ -4225,6 +4225,10 @@ pub fn qwen4StreamingWeightKey(layout: expert_quant.Layout, buf: []u8, key: []co
 pub const ResidentSplit = struct { trunk: u64, mtp: u64 };
 
 pub fn streamingResidentSplit(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !ResidentSplit {
+    return streamingResidentSplitWithVision(io, allocator, model_dir, layout, false);
+}
+
+pub fn streamingResidentSplitWithVision(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout, load_vision: bool) !ResidentSplit {
     if (layout == .mxfp4_individual)
         return .{ .trunk = try @import("mimo_source.zig").residentBytes(io, allocator, model_dir), .mtp = 0 };
     if (layout == .exl3_k4) {
@@ -4268,7 +4272,7 @@ pub fn streamingResidentSplit(io: std.Io, allocator: std.mem.Allocator, model_di
             if (std.mem.eql(u8, tensor.key_ptr.*, "__metadata__")) continue;
             var key_buf: [512]u8 = undefined;
             const canonical = qwen4StreamingWeightKey(layout, &key_buf, tensor.key_ptr.*) orelse continue;
-            if (!shouldKeepWeightKey(canonical, false)) continue;
+            if (!shouldKeepWeightKey(canonical, load_vision)) continue;
             if (tensor.value_ptr.* != .object) return error.InvalidSafetensorsHeader;
             const offsets = tensor.value_ptr.object.get("data_offsets") orelse return error.InvalidSafetensorsHeader;
             if (offsets != .array or offsets.array.items.len != 2 or offsets.array.items[0] != .integer or offsets.array.items[1] != .integer) return error.InvalidSafetensorsHeader;
@@ -4403,17 +4407,21 @@ pub fn loadWeightsForConfig(
         logMimoSourceLoad(config, false);
         return @import("mimo_source.zig").loadWeights(io, allocator, model_dir, config);
     }
-    if (config.expert_streaming) return loadWeightsStreaming(io, allocator, model_dir, config.expert_layout);
+    if (config.expert_streaming) return loadWeightsStreamingWithVision(io, allocator, model_dir, config.expert_layout, load_vision and config.isQwen4());
     if (config.usesMimoSourceTrunk()) return loadWeightsMimoSource(io, allocator, model_dir, load_vision and config.mimo_vision);
     if (load_vision) return loadWeightsWithVision(io, allocator, model_dir);
     return loadWeights(io, allocator, model_dir);
 }
 
 pub fn loadWeightsStreaming(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout) !Weights {
+    return loadWeightsStreamingWithVision(io, allocator, model_dir, layout, false);
+}
+
+fn loadWeightsStreamingWithVision(io: std.Io, allocator: std.mem.Allocator, model_dir: []const u8, layout: expert_quant.Layout, load_vision: bool) !Weights {
     if (layout == .mxfp4_individual) return loadWeightsMimoSource(io, allocator, model_dir, false);
     var dir = try std.Io.Dir.openDirAbsolute(io, model_dir, .{ .iterate = true });
     defer dir.close(io);
-    return loadWeightsFromOpenDirMode(io, allocator, dir, model_dir, false, layout);
+    return loadWeightsFromOpenDirMode(io, allocator, dir, model_dir, load_vision, layout);
 }
 
 /// Load ONE safetensors file (absolute path) into a Weights map — for
@@ -8020,7 +8028,7 @@ test "the streamed load drops the MTP head the ledger bills at zero" {
     }
 }
 
-test "qwen4 streaming resident byte estimate excludes experts PLE and vision" {
+test "qwen4 streaming resident byte estimate and loader honor vision without loading experts" {
     const t = std.testing;
     const io = t.io;
     var tmp = t.tmpDir(.{ .iterate = true });
@@ -8038,6 +8046,18 @@ test "qwen4 streaming resident byte estimate excludes experts PLE and vision" {
     const split = try streamingResidentSplit(io, t.allocator, path_buf[0..path_len], .bf16_fused);
     try t.expectEqual(@as(u64, 6), split.trunk);
     try t.expectEqual(@as(u64, 12), split.mtp);
+    const visual_split = try streamingResidentSplitWithVision(io, t.allocator, path_buf[0..path_len], .bf16_fused, true);
+    try t.expectEqual(@as(u64, 8), visual_split.trunk);
+    try t.expectEqual(split.mtp, visual_split.mtp);
+    var config = ModelConfig{ .model_type = "qwen4_exp", .expert_streaming = true, .expert_layout = .bf16_fused };
+    var with_vision = try loadWeightsForConfig(io, t.allocator, path_buf[0..path_len], &config, true);
+    defer with_vision.deinit();
+    try t.expect(with_vision.get("model.visual.x") != null);
+    try t.expectEqual(@as(usize, 2), with_vision.count());
+    var text_only = try loadWeightsForConfig(io, t.allocator, path_buf[0..path_len], &config, false);
+    defer text_only.deinit();
+    try t.expect(text_only.get("model.visual.x") == null);
+    try t.expectEqual(@as(usize, 1), text_only.count());
 }
 
 test "real qwen streaming resident estimate is trunk plus MTP only" {
